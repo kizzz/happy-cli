@@ -27,6 +27,12 @@ import { notifyDaemonSessionStarted } from "@/daemon/controlClient";
 import { registerKillSessionHandler } from "@/claude/registerKillSessionHandler";
 import { delay } from "@/utils/time";
 import { stopCaffeinate } from "@/utils/caffeinate";
+import { parse as parseToml } from '@iarna/toml';
+
+type CodexTomlConfig = {
+    mcp_servers?: Record<string, unknown>;
+    [key: string]: unknown;
+};
 
 type ReadyEventOptions = {
     pending: unknown;
@@ -54,6 +60,45 @@ export function emitReadyIfIdle({ pending, queueSize, shouldExit, sendReady, not
     sendReady();
     notify?.();
     return true;
+}
+
+function getCodexConfigPath(): string {
+    const codexHomeDir = process.env.CODEX_HOME || join(os.homedir(), '.codex');
+    return join(codexHomeDir, 'config.toml');
+}
+
+function loadUserCodexConfig(): CodexTomlConfig | undefined {
+    try {
+        const configPath = getCodexConfigPath();
+        if (!fs.existsSync(configPath)) {
+            logger.debug(`[Codex] No config.toml found at ${configPath}, skipping user config merge`);
+            return undefined;
+        }
+
+        const raw = fs.readFileSync(configPath, 'utf8');
+        if (!raw.trim()) {
+            return undefined;
+        }
+
+        const parsed = parseToml(raw) as CodexTomlConfig;
+        return parsed;
+    } catch (error) {
+        logger.warn('[Codex] Failed to read config.toml; continuing with Happy defaults', error);
+    }
+    return undefined;
+}
+
+function buildMcpServerOverrides(base: Record<string, unknown>, userConfig?: CodexTomlConfig): Record<string, unknown> {
+    const userServers = userConfig?.mcp_servers;
+    if (!userServers || typeof userServers !== 'object') {
+        return base;
+    }
+
+    logger.debug('[Codex] Merging user-configured MCP servers with Happy bridge');
+    return {
+        ...(userServers as Record<string, unknown>),
+        ...base
+    };
 }
 
 /**
@@ -536,12 +581,17 @@ export async function runCodex(opts: {
     // Start Happy MCP server (HTTP) and prepare STDIO bridge config for Codex
     const happyServer = await startHappyServer(session);
     const bridgeCommand = join(projectPath(), 'bin', 'happy-mcp.mjs');
-    const mcpServers = {
+    const userCodexConfig = loadUserCodexConfig();
+    const mergedMcpServers = buildMcpServerOverrides({
         happy: {
             command: bridgeCommand,
             args: ['--url', happyServer.url]
         }
-    } as const;
+    }, userCodexConfig);
+    const baseCodexConfigOverrides: Record<string, unknown> = userCodexConfig
+        ? { ...userCodexConfig }
+        : {};
+    baseCodexConfigOverrides['mcp_servers'] = mergedMcpServers;
     let first = true;
 
     try {
@@ -638,9 +688,9 @@ export async function runCodex(opts: {
                     const startConfig: CodexSessionConfig = {
                         prompt: first ? message.message + '\n\n' + trimIdent(`Based on this message, call functions.happy__change_title to change chat session title that would represent the current task. If chat idea would change dramatically - call this function again to update the title.`) : message.message,
                         sandbox,
-                        'approval-policy': approvalPolicy,
-                        config: { mcp_servers: mcpServers }
+                        'approval-policy': approvalPolicy
                     };
+                    const configOverrides: Record<string, unknown> = { ...baseCodexConfigOverrides };
                     if (message.mode.model) {
                         startConfig.model = message.mode.model;
                     }
@@ -667,7 +717,11 @@ export async function runCodex(opts: {
                     
                     // Apply resume file if found
                     if (resumeFile) {
-                        (startConfig.config as any).experimental_resume = resumeFile;
+                        configOverrides.experimental_resume = resumeFile;
+                    }
+
+                    if (Object.keys(configOverrides).length > 0) {
+                        startConfig.config = configOverrides;
                     }
                     
                     await client.startSession(

@@ -10,21 +10,30 @@ import { z } from 'zod';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { execSync } from 'child_process';
+import os from 'node:os';
+import { join } from 'node:path';
+import fs from 'node:fs';
 
 const DEFAULT_TIMEOUT = 14 * 24 * 60 * 60 * 1000; // 14 days, which is the half of the maximum possible timeout (~28 days for int32 value in NodeJS)
 
 /**
- * Get the correct MCP subcommand based on installed codex version
- * Versions >= 0.43.0-alpha.5 use 'mcp-server', older versions use 'mcp'
+ * Determine the preferred Codex MCP subcommand.
+ * Versions >= 0.43.0-alpha.5 (and local dev builds reporting 0.0.0) use 'mcp-server'.
+ * Older releases fall back to 'mcp'.
  */
-function getCodexMcpCommand(): string {
+function detectCodexMcpCommand(): 'mcp' | 'mcp-server' {
     try {
         const version = execSync('codex --version', { encoding: 'utf8' }).trim();
         const match = version.match(/codex-cli\s+(\d+\.\d+\.\d+(?:-alpha\.\d+)?)/);
         if (!match) return 'mcp-server'; // Default to newer command if we can't parse
 
         const versionStr = match[1];
-        const [major, minor, patch] = versionStr.split(/[-.]/).map(Number);
+        const [major = 0, minor = 0, patch = 0] = versionStr.split(/[-.]/).map(Number);
+
+        // Local dev builds report 0.0.0 – treat them as modern.
+        if (major === 0 && minor === 0 && patch === 0) {
+            return 'mcp-server';
+        }
 
         // Version >= 0.43.0-alpha.5 has mcp-server
         if (major > 0 || minor > 43) return 'mcp-server';
@@ -41,6 +50,22 @@ function getCodexMcpCommand(): string {
         logger.debug('[CodexMCP] Error detecting codex version, defaulting to mcp-server:', error);
         return 'mcp-server'; // Default to newer command
     }
+}
+
+function getMcpCommandCandidates(): ('mcp' | 'mcp-server')[] {
+    const forcedCommand = process.env.HAPPY_FORCE_CODEX_MCP_COMMAND?.trim() as
+        | 'mcp'
+        | 'mcp-server'
+        | undefined;
+    if (forcedCommand) {
+        logger.debug(`[CodexMCP] Using forced MCP command from env: ${forcedCommand}`);
+        return [forcedCommand];
+    }
+
+    const primary = detectCodexMcpCommand();
+    const secondary = primary === 'mcp' ? 'mcp-server' : 'mcp';
+
+    return primary === secondary ? [primary] : [primary, secondary];
 }
 
 export class CodexMcpClient {
@@ -84,26 +109,58 @@ export class CodexMcpClient {
     async connect(): Promise<void> {
         if (this.connected) return;
 
-        const mcpCommand = getCodexMcpCommand();
-        logger.debug(`[CodexMCP] Connecting to Codex MCP server using command: codex ${mcpCommand}`);
-
-        this.transport = new StdioClientTransport({
-            command: 'codex',
-            args: [mcpCommand],
-            env: Object.keys(process.env).reduce((acc, key) => {
-                const value = process.env[key];
-                if (typeof value === 'string') acc[key] = value;
-                return acc;
-            }, {} as Record<string, string>)
-        });
-
+        const env = Object.keys(process.env).reduce((acc, key) => {
+            const value = process.env[key];
+            if (typeof value === 'string') acc[key] = value;
+            return acc;
+        }, {} as Record<string, string>);
+        const codexHomeDir = env.CODEX_HOME || join(os.homedir(), '.codex');
+        const codexConfigPath = join(codexHomeDir, 'config.toml');
+        const configExists = fs.existsSync(codexConfigPath);
         // Register request handlers for Codex permission methods
         this.registerPermissionHandlers();
 
-        await this.client.connect(this.transport);
-        this.connected = true;
+        const commandCandidates = getMcpCommandCandidates();
+        let lastError: unknown;
 
-        logger.debug('[CodexMCP] Connected to Codex');
+        for (const mcpCommand of commandCandidates) {
+            logger.debug(`[CodexMCP] Attempting to connect using command: codex ${mcpCommand}`);
+            logger.info('[CodexMCP] Spawning Codex CLI', {
+                command: 'codex',
+                args: [mcpCommand],
+                cwd: process.cwd(),
+                env: {
+                    HOME: env.HOME,
+                    CODEX_HOME: env.CODEX_HOME,
+                    HAPPY_HOME_DIR: env.HAPPY_HOME_DIR,
+                },
+                codexConfigPath,
+                configExists
+            });
+
+            try {
+                await this.connectUsingCommand(mcpCommand, env);
+                this.connected = true;
+                logger.debug(`[CodexMCP] Connected to Codex using command: codex ${mcpCommand}`);
+                return;
+            } catch (error) {
+                lastError = error;
+                logger.warn(`[CodexMCP] Failed to connect with command: codex ${mcpCommand}`, error);
+            }
+        }
+
+        throw lastError ?? new Error('Failed to connect to Codex MCP server');
+    }
+
+    private async connectUsingCommand(command: 'mcp' | 'mcp-server', env: Record<string, string>): Promise<void> {
+        const transport = new StdioClientTransport({
+            command: 'codex',
+            args: [command],
+            env
+        });
+
+        await this.client.connect(transport);
+        this.transport = transport;
     }
 
     private registerPermissionHandlers(): void {
