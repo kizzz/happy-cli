@@ -67,7 +67,6 @@ function getMcpCommandCandidates(): ('mcp' | 'mcp-server')[] {
 
     return primary === secondary ? [primary] : [primary, secondary];
 }
-
 export class CodexMcpClient {
     private client: Client;
     private transport: StdioClientTransport | null = null;
@@ -117,6 +116,7 @@ export class CodexMcpClient {
         const codexHomeDir = env.CODEX_HOME || join(os.homedir(), '.codex');
         const codexConfigPath = join(codexHomeDir, 'config.toml');
         const configExists = fs.existsSync(codexConfigPath);
+
         // Register request handlers for Codex permission methods
         this.registerPermissionHandlers();
 
@@ -221,7 +221,13 @@ export class CodexMcpClient {
     async startSession(config: CodexSessionConfig, options?: { signal?: AbortSignal }): Promise<CodexToolResponse> {
         if (!this.connected) await this.connect();
 
-        logger.debug('[CodexMCP] Starting Codex session:', config);
+        // Log session start without exposing config parameters (which may contain sensitive data)
+        const safeLogInfo: Record<string, any> = {};
+        if (config.model) safeLogInfo.model = config.model;
+        if (config.sandbox) safeLogInfo.sandbox = config.sandbox;
+        if (config['approval-policy']) safeLogInfo['approval-policy'] = config['approval-policy'];
+        if (config.profile) safeLogInfo.profile = config.profile;
+        logger.debug('[CodexMCP] Starting Codex session:', safeLogInfo);
 
         const response = await this.client.callTool({
             name: 'codex',

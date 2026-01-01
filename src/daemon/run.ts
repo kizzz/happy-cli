@@ -11,6 +11,7 @@ import { authAndSetupMachineIfNeeded } from '@/ui/auth';
 import { configuration } from '@/configuration';
 import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import packageJson from '../../package.json';
+import { JobQueueProcessor } from './jobQueueProcessor';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock } from '@/persistence';
@@ -449,6 +450,15 @@ export async function startDaemon(): Promise<void> {
     // Connect to server
     apiMachine.connect();
 
+    // Start job queue processor
+    const jobQueueProcessor = new JobQueueProcessor({
+      credentials,
+      machineId,
+      maxConcurrentJobs: parseInt(process.env.HAPPY_MAX_CONCURRENT_JOBS || '3')
+    });
+    jobQueueProcessor.start();
+    logger.debug('[DAEMON RUN] Job queue processor started');
+
     // Every 60 seconds:
     // 1. Prune stale sessions
     // 2. Check if daemon needs update
@@ -541,6 +551,10 @@ export async function startDaemon(): Promise<void> {
     // Setup signal handlers
     const cleanupAndShutdown = async (source: 'happy-app' | 'happy-cli' | 'os-signal' | 'exception', errorMessage?: string) => {
       logger.debug(`[DAEMON RUN] Starting proper cleanup (source: ${source}, errorMessage: ${errorMessage})...`);
+
+      // Stop job queue processor
+      logger.debug('[DAEMON RUN] Stopping job queue processor');
+      jobQueueProcessor.stop();
 
       // Clear health check interval
       if (restartOnStaleVersionAndHeartbeat) {
