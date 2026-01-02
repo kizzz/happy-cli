@@ -95,18 +95,21 @@ import { execFileSync } from 'node:child_process'
     try {
       const { runCodex } = await import('@/codex/runCodex');
       
-      // Parse startedBy argument
+      // Parse startedBy and joinSessionId arguments
       let startedBy: 'daemon' | 'terminal' | undefined = undefined;
+      let joinSessionId: string | undefined = undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--started-by') {
           startedBy = args[++i] as 'daemon' | 'terminal';
+        } else if (args[i] === '--join-session') {
+          joinSessionId = args[++i];
         }
       }
       
       const {
         credentials
       } = await authAndSetupMachineIfNeeded();
-      await runCodex({credentials, startedBy});
+      await runCodex({credentials, startedBy, joinSessionId});
       // Do not force exit here; allow instrumentation to show lingering handles
     } catch (error) {
       console.error(chalk.red('Error:'), error instanceof Error ? error.message : 'Unknown error')
@@ -264,6 +267,7 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
     const options: StartOptions = {}
     let showHelp = false
     let showVersion = false
+    let joinSessionId: string | undefined = undefined
     const unknownArgs: string[] = [] // Collect unknown args to pass through to claude
 
     for (let i = 0; i < args.length; i++) {
@@ -284,6 +288,8 @@ ${chalk.bold('To clean up runaway processes:')} Use ${chalk.cyan('happy doctor c
         unknownArgs.push('--dangerously-skip-permissions')
       } else if (arg === '--started-by') {
         options.startedBy = args[++i] as 'daemon' | 'terminal'
+      } else if (arg === '--join-session') {
+        joinSessionId = args[++i]
       } else {
         // Pass unknown arguments through to claude
         unknownArgs.push(arg)

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
 import { loop } from '@/claude/loop';
-import { AgentState, Metadata } from '@/api/types';
+import { AgentState, Metadata, Session } from '@/api/types';
 import packageJson from '../../package.json';
 import { Credentials, readSettings } from '@/persistence';
 import { EnhancedMode, PermissionMode } from './loop';
@@ -51,9 +51,6 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     // Create session service
     const api = await ApiClient.create(credentials);
 
-    // Create a new session
-    let state: AgentState = {};
-
     // Get machine ID from settings (should already be set up)
     const settings = await readSettings();
     let machineId = settings?.machineId
@@ -69,26 +66,36 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         metadata: initialMachineMetadata
     });
 
-    let metadata: Metadata = {
-        path: workingDirectory,
-        host: os.hostname(),
-        version: packageJson.version,
-        os: os.platform(),
-        machineId: machineId,
-        homeDir: os.homedir(),
-        happyHomeDir: configuration.happyHomeDir,
-        happyLibDir: projectPath(),
-        happyToolsDir: resolve(projectPath(), 'tools', 'unpacked'),
-        startedFromDaemon: options.startedBy === 'daemon',
-        hostPid: process.pid,
-        startedBy: options.startedBy || 'terminal',
-        // Initialize lifecycle state
-        lifecycleState: 'running',
-        lifecycleStateSince: Date.now(),
-        flavor: 'claude'
-    };
-    const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
-    logger.debug(`Session created: ${response.id}`);
+    // Join existing session or create new one
+    let response: Session;
+    if (options.joinSessionId) {
+        logger.debug(`Joining existing session: ${options.joinSessionId}`);
+        response = await api.joinSession(options.joinSessionId);
+        logger.debug(`Session joined: ${response.id}`);
+    } else {
+        // Create a new session
+        let state: AgentState = {};
+        let metadata: Metadata = {
+            path: workingDirectory,
+            host: os.hostname(),
+            version: packageJson.version,
+            os: os.platform(),
+            machineId: machineId,
+            homeDir: os.homedir(),
+            happyHomeDir: configuration.happyHomeDir,
+            happyLibDir: projectPath(),
+            happyToolsDir: resolve(projectPath(), 'tools', 'unpacked'),
+            startedFromDaemon: options.startedBy === 'daemon',
+            hostPid: process.pid,
+            startedBy: options.startedBy || 'terminal',
+            // Initialize lifecycle state
+            lifecycleState: 'running',
+            lifecycleStateSince: Date.now(),
+            flavor: 'claude'
+        };
+        response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+        logger.debug(`Session created: ${response.id}`);
+    }
 
     // Always report to daemon if it exists
     try {

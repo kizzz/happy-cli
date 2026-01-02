@@ -4,6 +4,8 @@ import type { AgentState, CreateSessionResponse, Metadata, Session, Machine, Mac
 import { ApiSessionClient } from './apiSession';
 import { ApiMachineClient } from './apiMachine';
 import { decodeBase64, encodeBase64, getRandomBytes, encrypt, decrypt, libsodiumEncryptForPublicKey } from './encryption';
+import { decryptWithEphemeralKey } from '@/ui/auth';
+import { deriveKey } from '@/utils/deriveKey';
 import { PushNotificationClient } from './pushNotifications';
 import { configuration } from '@/configuration';
 import chalk from 'chalk';
@@ -21,6 +23,85 @@ export class ApiClient {
   private constructor(credential: Credentials) {
     this.credential = credential
     this.pushClient = new PushNotificationClient(credential.token, configuration.serverUrl)
+  }
+
+  /**
+   * Join an existing session by ID
+   */
+  async joinSession(sessionId: string): Promise<Session> {
+    try {
+      const response = await axios.get(
+        `${configuration.serverUrl}/v1/sessions/${sessionId}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${this.credential.token}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 60000
+        }
+      );
+
+      logger.debug(`Session joined: ${response.data.session.id}`)
+      let raw = response.data.session;
+      
+      // Determine encryption variant based on dataEncryptionKey
+      let encryptionKey: Uint8Array;
+      let encryptionVariant: 'legacy' | 'dataKey';
+      if (raw.dataEncryptionKey) {
+        // Data key encryption - decrypt the data key
+        const encryptedDataKey = decodeBase64(raw.dataEncryptionKey);
+        if (encryptedDataKey[0] === 0) {
+          // Version 0 format: encrypted data key is in the bundle after version byte
+          const encryptedKeyBundle = encryptedDataKey.slice(1);
+          
+          // Decrypt using account's content key (derived from secret)
+          if (this.credential.encryption.type === 'dataKey') {
+            // For dataKey accounts, derive content key from machineKey
+            // The dataEncryptionKey was encrypted with the account's public key
+            // We need to decrypt it using the account's secret key (content key)
+            const contentKey = this.credential.encryption.machineKey; // This is the content key for dataKey accounts
+            const decryptedDataKey = decryptWithEphemeralKey(encryptedKeyBundle, contentKey);
+            if (!decryptedDataKey) {
+              throw new Error('Failed to decrypt session data encryption key');
+            }
+            encryptionKey = decryptedDataKey;
+            encryptionVariant = 'dataKey';
+          } else {
+            // Legacy account - derive content key from secret
+            const contentKey = await deriveKey(this.credential.encryption.secret, 'Happy EnCoder', ['content']);
+            const decryptedDataKey = decryptWithEphemeralKey(encryptedKeyBundle, contentKey);
+            if (!decryptedDataKey) {
+              throw new Error('Failed to decrypt session data encryption key');
+            }
+            encryptionKey = decryptedDataKey;
+            encryptionVariant = 'dataKey';
+          }
+        } else {
+          // Legacy format - no dataEncryptionKey version byte
+          encryptionKey = this.credential.encryption.secret;
+          encryptionVariant = 'legacy';
+        }
+      } else {
+        // Legacy encryption - no dataEncryptionKey
+        encryptionKey = this.credential.encryption.secret;
+        encryptionVariant = 'legacy';
+      }
+
+      let session: Session = {
+        id: raw.id,
+        seq: raw.seq,
+        metadata: decrypt(encryptionKey, encryptionVariant, decodeBase64(raw.metadata)),
+        metadataVersion: raw.metadataVersion,
+        agentState: raw.agentState ? decrypt(encryptionKey, encryptionVariant, decodeBase64(raw.agentState)) : null,
+        agentStateVersion: raw.agentStateVersion,
+        encryptionKey: encryptionKey,
+        encryptionVariant: encryptionVariant
+      }
+      return session;
+    } catch (error) {
+      logger.debug('[API] [ERROR] Failed to join session:', error);
+      throw new Error(`Failed to join session: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   /**

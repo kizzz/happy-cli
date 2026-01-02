@@ -141,31 +141,39 @@ export async function runCodex(opts: {
     });
 
     //
-    // Create session
+    // Join existing session or create new one
     //
 
-    let state: AgentState = {
-        controlledByUser: false,
+    let response: Session;
+    if (opts.joinSessionId) {
+        logger.debug(`Joining existing session: ${opts.joinSessionId}`);
+        response = await api.joinSession(opts.joinSessionId);
+        logger.debug(`Session joined: ${response.id}`);
+    } else {
+        let state: AgentState = {
+            controlledByUser: false,
+        }
+        let metadata: Metadata = {
+            path: process.cwd(),
+            host: os.hostname(),
+            version: packageJson.version,
+            os: os.platform(),
+            machineId: machineId,
+            homeDir: os.homedir(),
+            happyHomeDir: configuration.happyHomeDir,
+            happyLibDir: projectPath(),
+            happyToolsDir: resolve(projectPath(), 'tools', 'unpacked'),
+            startedFromDaemon: opts.startedBy === 'daemon',
+            hostPid: process.pid,
+            startedBy: opts.startedBy || 'terminal',
+            // Initialize lifecycle state
+            lifecycleState: 'running',
+            lifecycleStateSince: Date.now(),
+            flavor: 'codex'
+        };
+        response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
+        logger.debug(`Session created: ${response.id}`);
     }
-    let metadata: Metadata = {
-        path: process.cwd(),
-        host: os.hostname(),
-        version: packageJson.version,
-        os: os.platform(),
-        machineId: machineId,
-        homeDir: os.homedir(),
-        happyHomeDir: configuration.happyHomeDir,
-        happyLibDir: projectPath(),
-        happyToolsDir: resolve(projectPath(), 'tools', 'unpacked'),
-        startedFromDaemon: opts.startedBy === 'daemon',
-        hostPid: process.pid,
-        startedBy: opts.startedBy || 'terminal',
-        // Initialize lifecycle state
-        lifecycleState: 'running',
-        lifecycleStateSince: Date.now(),
-        flavor: 'codex'
-    };
-    const response = await api.getOrCreateSession({ tag: sessionTag, metadata, state });
     const session = api.sessionSyncClient(response);
 
     // Always report to daemon if it exists
